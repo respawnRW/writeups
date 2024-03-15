@@ -12,15 +12,15 @@ Couple of my favorite challenges with their writeups.
 
 ## Reversing
 
-[QuickScan](rev/quick_scan/README.md)
+[QuickScan](rev/quickscan/README.md)
 
 ## Forensics
 
-[Confinement](forensics/confinement/README.md)
+[Confinement](frns/confinement/README.md)
 
-[Game Invitation](forensics/game_invitation/README.md)
+[Game Invitation](frns/gameinv/README.md)
 
 
 ## Hardware
 
-[Flash-ing Logs](hardware/flash_ing_logs/README.md)
+[Flash-ing Logs](hw/flashing/README.md)
