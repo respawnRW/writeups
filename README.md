@@ -1,7 +1,6 @@
 # Cyber Apocalypse 2024: Hacker Royale
 
-![sdfsdf](hackers_royale.jpg)
-
+![hackers_royale](https://github.com/respawnRW/writeups/assets/163560495/97034af0-bef9-4dd2-bd7c-feca8ff135ba)
 
 ## Misc
 
