@@ -233,9 +233,7 @@ payload = flat(
 io.send(payload + b'\r\n\r\n')
 ```
 
-Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. 
-
-Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
+Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
 
 ```python
 #!/usr/bin/env python3
@@ -332,7 +330,7 @@ io.interactive()  # Switch to interactive mode after sending the payload
 io.close()  # Close the connection after exploitation
 ```
 
-Don't forget to run the docker build and have it running locally in your environment.
+Don't forget to run the docker build and have it running locally in your environment. 
 
 ```
 Sending payload:
