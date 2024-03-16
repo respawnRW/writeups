@@ -8,19 +8,19 @@ Couple of my favorite challenges with their writeups.
 
 [Oracle](pwn/oracle/README.md)
 
-[Deathnote](pwn/deathnote/README.md)
+[Deathnote](pwn/deathnote/README.md) (work in progress)
 
 ## Reversing
 
-[QuickScan](rev/quickscan/README.md)
+[QuickScan](rev/quickscan/README.md)  (work in progress)
 
 ## Forensics
 
-[Confinement](frns/confinement/README.md)
+[Confinement](frns/confinement/README.md)  (work in progress)
 
-[Game Invitation](frns/gameinv/README.md)
+[Game Invitation](frns/gameinv/README.md)  (work in progress)
 
 
 ## Hardware
 
-[Flash-ing Logs](hw/flashing/README.md)
+[Flash-ing Logs](hw/flashing/README.md) (work in progress)
