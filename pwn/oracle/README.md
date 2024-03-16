@@ -360,8 +360,17 @@ Finally, we can run our script on the remote, achieve shell, and grab the flag.
 
 The "live" flag in plaintext: `HTB{wH4t_d1D_tH3_oRAcL3_s4y_tO_tH3_f1gHt3r?}`
 
+
 Hope you enjoyed.
 
 Over and out,
 
 `--RW`
+
+## Resources
+
+https://book.hacktricks.xyz/reversing-and-exploiting/linux-exploiting-basic-esp/rop-leaking-libc-address
+
+https://www.ired.team/offensive-security/code-injection-process-injection/binary-exploitation/rop-chaining-return-oriented-programming
+
+https://libc.blukat.me/
