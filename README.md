@@ -6,21 +6,21 @@ Couple of my favorite challenges with their writeups.
 
 ## Pwn
 
-[Oracle](pwn/oracle/README.md)
+[Oracle](pwn/oracle/README.md) | hard | writeup done.
 
-[Deathnote](pwn/deathnote/README.md)
+[Deathnote](pwn/deathnote/README.md) | hard | (work in progress)
 
 ## Reversing
 
-[QuickScan](rev/quick_scan/README.md)
+[QuickScan](rev/quickscan/README.md) | medium | (work in progress)
 
 ## Forensics
 
-[Confinement](forensics/confinement/README.md)
+[Confinement](frns/confinement/README.md) | hard | (work in progress)
 
-[Game Invitation](forensics/game_invitation/README.md)
+[Game Invitation](frns/gameinv/README.md) | hard | (work in progress)
 
 
 ## Hardware
 
-[Flash-ing Logs](hardware/flash_ing_logs/README.md)
+[Flash-ing Logs](hw/flashing/README.md) | hard | (work in progress)

