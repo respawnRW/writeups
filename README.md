@@ -12,7 +12,7 @@ Couple of my favorite challenges with their writeups.
 
 ## Reversing
 
-[QuickScan](rev/quickscan/README.md) | medium | (work in progress)
+[QuickScan](rev/quickscan/README.md) | medium | writeup done.
 
 ## Forensics
 
