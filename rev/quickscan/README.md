@@ -130,3 +130,9 @@ And here's how it runs, it's really fast. Usually it takes less than 10 seconds,
 ![image](https://github.com/respawnRW/writeups/assets/163560495/3eaf614d-423f-46d0-b791-f341386116f4)
 
 Flag: `HTB{y0u_4n4lyz3d_th3_p4tt3ns!}`
+
+Hope you find it useful,
+
+Over and out,
+
+`--RW`
