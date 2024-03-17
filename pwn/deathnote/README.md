@@ -206,7 +206,7 @@ io.interactive()
 io.close()
 ```
 
-And here's how the script is doing its job.
+And here's how the script is doing its job. Add "REMOTE" argument if connecting remotely, or run without any argument if locally.
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/31d05974-1139-4d45-9bec-14fbfe018826)
 
