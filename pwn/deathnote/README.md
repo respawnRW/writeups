@@ -32,6 +32,83 @@ Assumption is that we are trying to execute memory location, something that caus
 
 And we're going to work on this! Option no 42 is the key ?¿?¿? to pwn.
 
+## Disassemble
+
+Pick your favorite disassemble and let's dwipe into this short binary. Let's tear its functionalities into pieces and parts.
+
+What we are really keen on is the functionality number 42, the others are seemingly normal options, working just as expected.
+
+Upon disassembling in Ghidra, we find `main`, `show`, `add`, `delete`, a few boring ones such as `read_num`, `cls`, `menu`, `setup`, etc.
+
+For the sake of this writeup, I will only include the function that stands out, is the `_` function. Which is the undocumented #42! Probably? Yeah!
+
+```c
+void _(char **param_1)
+
+{
+  long lVar1;
+  code *pcVar2;
+  long in_FS_OFFSET;
+  
+  lVar1 = *(long *)(in_FS_OFFSET + 0x28);
+  puts("\x1b[1;33m");
+  cls();
+  printf(&DAT_00102750,&DAT_00102010,&DAT_001026b4,&DAT_00102010,&DAT_001026b4,&DAT_00102008);
+  pcVar2 = (code *)strtoull(*param_1,(char **)0x0,0x10);
+  if (((pcVar2 == (code *)0x0) && (**param_1 != '0')) && ((*param_1)[1] != 'x')) {
+    puts("Error: Invalid hexadecimal string");
+  }
+  else {
+    if ((*param_1 == (char *)0x0) || (param_1[1] == (char *)0x0)) {
+      error("What you are trying to do is unacceptable!\n");
+                    /* WARNING: Subroutine does not return */
+      exit(0x520);
+    }
+    puts(&DAT_00102848);
+    (*pcVar2)(param_1[1]);
+  }
+  if (lVar1 != *(long *)(in_FS_OFFSET + 0x28)) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail();
+  }
+  return;
+}
+```
+And we need to look at the delete function as well.
+
+<details open>
+<summary function delete </summary>
+```c
+void delete(long param_1)
+
+{
+  long lVar1;
+  byte bVar2;
+  char cVar3;
+  long in_FS_OFFSET;
+  
+  lVar1 = *(long *)(in_FS_OFFSET + 0x28);
+  printf(&DAT_0010268e);
+  bVar2 = read_num();
+  cVar3 = check_idx(bVar2);
+  if (cVar3 == '\x01') {
+    if (*(long *)(param_1 + (ulong)bVar2 * 8) == 0) {
+      error("Page is already empty!\n");
+    }
+    else {
+      printf("%s\nRemoving page [%d]\n\n%s",&DAT_0010272e,(ulong)bVar2,&DAT_00102008);
+    }
+    free(*(void **)(param_1 + (ulong)bVar2 * 8));
+  }
+  if (lVar1 != *(long *)(in_FS_OFFSET + 0x28)) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail();
+  }
+  return;
+}
+```
+</details>
+
 ## Solution
 
 What we can see during the disassembly is that our assumption was correct. Option 42 is trying to execute the address from page 0 with the argument of page 1 as parameter. This means we are going to attemt use after free vulnerability exploitation. Malloc metadata from the freed chunks should be leakable. Our plan is to prepare the heap, fill up the tcache bins, so the metadata of malloc is going to leak the `unsortedbin` address in libc and finally we can calculate the base address of it.
