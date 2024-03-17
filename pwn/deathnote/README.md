@@ -6,7 +6,7 @@
 
 ## Analysis
 
-First let's examine what we got. The deathnote binary is a simple note app with 4 functionalities. It is a secret what function 42 does, haha.
+First let's examine what we've got. The deathnote binary is a simple note app with 4 functionalities. It is a secret what function 42 does, haha.
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/491c9633-53eb-4064-beb4-e4b833991a99)
 
@@ -34,17 +34,17 @@ And we're going to work on this! Option no 42 is the key ?¿?¿? to pwn? Let's f
 
 ## Disassemble
 
-Pick your favorite disassembler and let's dwipe into this short binary. Let's tear its functionalities into pieces & parts.
+Pick your favorite disassembler and let's dive into this short binary. Let's tear its functionalities into pieces & parts.
 
 What we are really keen on is the functionality number 42, the others are seemingly normal options, working just as expected.
 
 Upon disassembling in Ghidra, we find `main`, `show`, `add`, `delete`, a few boring ones such as `read_num`, `cls`, `menu`, `setup`, etc.
 
-For the sake of this writeup, I will only include the function that stands out, is the `_` function. Which is the undocumented #42! Probably? Yeah!
+For the sake of this writeup, I will only include the function that stands out, the `_` function. This is the undocumented #42! Probably? Yeah!
 
 The `42` functionality converts the first parameter to a function pointer and attempts to execute it, passing the second parameter as argument. 
 
-This means our assumption was correct. This is a clear vulnerability that can be exploited if we control the `char **param1` and achieve arbitrary code execution. Let's see below why this is possible. Also, it is pretty clear why it leads to segmentation fault during normal operation. By choosing option 42, segmentation fault happens because the conversion from string to function pointer fails to result in a valid address or an executable memory region. Even if, somehow, it points to a valid memory address, chances are it's not towards a legitimate function and won't end up respecting the calling parameters, leading to improper execution flow, which in the end resulting in a SEGFAULT. Let's see why.
+This means our assumption was correct. This is a clear vulnerability that can be exploited if we control the `char **param1` and achieve arbitrary code execution. Let's see below how this is possible. Also, it is pretty clear why it leads to segmentation fault during normal operation. By choosing option 42, segmentation fault happens because the conversion from string to function pointer fails to result in a valid address or an executable memory region. Even if, somehow, it points to a valid memory address, chances are it's not towards a legitimate function and won't end up respecting the calling parameters, leading to improper execution flow, which in the end results in a SEGFAULT. Let's see why.
 
 ```c
 void _(char **param_1)
@@ -79,7 +79,7 @@ void _(char **param_1)
 }
 ```
 
-And we need to look at the `delete` function too. Pay close attention especially to the way the function frees up the memory allocated. What we can see is that it fails to nullify the pointer after freeing it. This results in a dangling pointer which screams UAF. This could have been fixed with a line of code like `(*(void **)(param_1 + (ulong)bVar2 * 8) = NULL;` but hey, this is a pwn challenge and we're happy to identify the vuln.
+And we need to look at the `delete` function too. Pay close attention especially to the way the function frees up the memory allocated. What we can see is that it fails to nullify the pointer after freeing it. This results in a dangling pointer, which screams UAF. This could have been fixed with a line of code like `(*(void **)(param_1 + (ulong)bVar2 * 8) = NULL;` but hey, this is a pwn challenge and we're happy to identify the vuln.
 
 In order to visualize this vulnerability, imagine a simple memory layout where each note is right after another. Deleting one of the notes, leaves something behind, that something creates a gap in the memory layout that can still be _seen_ by the application through the dangling pointer, offering possibilities for exploitation. This means that we can also fill the gap with malicious data.
 
@@ -113,7 +113,7 @@ void delete(long param_1)
 }
 ```
 
-If another function can and/or will interact with this freed memory, `show` and `add` functionalities for example, are going to interact and acces these memory locations. Therefore, in summary, what we're going to do is deleting a note, this means freeing up the note's content without nullyfing its pointer. Then we can use the `add` functionalities to allocate new data into the newly freed memory space, manipulate heap to place data (such as the libc address) into the freed memory space, and then finally using the `show` option we can leak the address. In the end, we can bypass ASLR this way, pretty smoothly.
+If another function will interact with this freed memory, `show` and `add` functionalities for example, are going to interact and acces these memory locations. Therefore, in summary, what we're going to do is deleting a note, this means freeing up the note's content without nullyfing its pointer. Then we can use the `add` functionalities to allocate new data into the newly freed memory space, manipulate heap to place data (such as the libc address) into the freed memory space, and then finally using the `show` option we can leak the address. In the end, we can bypass ASLR this way, pretty smoothly.
 
 The solution below will demonstrate the necessity of safe memory management practices, including nullifying pointers after freeing memory and validating pointers before use. 
 
