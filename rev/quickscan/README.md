@@ -75,6 +75,8 @@ temp - redirecting stdout into file
 
 This should make all sense what happens above. As final step, we're going to use python's `re` module to search for the regular expression specific pattenr in the radare output we generated. The regexp is `br"0x08048\w{3}`, in order to locate what we need. Yes, we are going to make the assumption that it's always the second match, the one correct. But this becomes pretty clear that all of the ELF files in this challenge are in the same fashion, lots of junk, then in the end the SUB / LEA / MOV / MOVSB instruction scheme. This means we can make that assumption.
 
+Finall, all that there's left to do is converting back the `expected_bytes` from binary data to a hexadecimal string and feeding it back to the challenge.
+
 This is the entire python script put together that solves all of the challenges in a Speedy Gonzales style. 
 
 ```python                                         
