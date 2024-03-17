@@ -10,7 +10,7 @@ First let's examine what we got. The deathnote binary is a simple note app with 
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/491c9633-53eb-4064-beb4-e4b833991a99)
 
-Let's check the binary securities, we also know that it's a pwn challenge, we ned to know what we are facing.
+Let's check the binary securities, we also know that it's a pwn challenge, we need to know what we are facing.
 ```bash
 └─$ checksec deathnote     
 [*] '/home/kali/htb_stuffz/ctf_2024/pwn_deathnote/challenge/deathnote'
@@ -24,23 +24,27 @@ Let's check the binary securities, we also know that it's a pwn challenge, we ne
 
 Main options that are self-explanatory functionalities are note creation (create note), remove entry (freeing up), and displaying a note.
 
-If we launch the binary, functionalities 1-3 are working fine. Nonetheless, the option 42 is giving us a segmentation fault.
+If we launch the binary, functionalities 1, 2, 3 are working fine. Nonetheless, the option 42 is giving us a segmentation fault.
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/2052f961-f70a-4f83-b6ad-94e8d3260220)
 
 Assumption is that we are trying to execute memory location, something that causes the segmentation fault. 
 
-And we're going to work on this! Option no 42 is the key ?¿?¿? to pwn.
+And we're going to work on this! Option no 42 is the key ?¿?¿? to pwn? Let's figure it out together!
 
 ## Disassemble
 
-Pick your favorite disassemble and let's dwipe into this short binary. Let's tear its functionalities into pieces and parts.
+Pick your favorite disassembler and let's dwipe into this short binary. Let's tear its functionalities into pieces & parts.
 
 What we are really keen on is the functionality number 42, the others are seemingly normal options, working just as expected.
 
 Upon disassembling in Ghidra, we find `main`, `show`, `add`, `delete`, a few boring ones such as `read_num`, `cls`, `menu`, `setup`, etc.
 
 For the sake of this writeup, I will only include the function that stands out, is the `_` function. Which is the undocumented #42! Probably? Yeah!
+
+The `42` functionality converts the first parameter to a function pointer and attempts to execute it, passing the second parameter as argument. 
+
+This means our assumption was correct. This is a clear vulnerability that can be exploited if we control the `char **param1` and achieve arbitrary code execution. Let's see below why this is possible. Also, it is pretty clear why it leads to segmentation fault during normal operation. By choosing option 42, segmentation fault happens because the conversion from string to function pointer fails to result in a valid address or an executable memory region. Even if, somehow, it points to a valid memory address, chances are it's not towards a legitimate function and won't end up respecting the calling parameters, leading to improper execution flow, which in the end resulting in a SEGFAULT. Let's see why.
 
 ```c
 void _(char **param_1)
@@ -74,10 +78,11 @@ void _(char **param_1)
   return;
 }
 ```
-And we need to look at the delete function as well.
 
-<details open>
-<summary function delete </summary>
+And we need to look at the `delete` function too. Pay close attention especially to the way the function frees up the memory allocated. What we can see is that it fails to nullify the pointer after freeing it. This results in a dangling pointer which screams UAF. This could have been fixed with a line of code like `(*(void **)(param_1 + (ulong)bVar2 * 8) = NULL;` but hey, this is a pwn challenge and we're happy to identify the vuln.
+
+In order to visualize this vulnerability, imagine a simple memory layout where each note is right after another. Deleting one of the notes, leaves something behind, that something creates a gap in the memory layout that can still be _seen_ by the application through the dangling pointer, offering possibilities for exploitation. This means that we can also fill the gap with malicious data.
+
 ```c
 void delete(long param_1)
 
@@ -107,17 +112,29 @@ void delete(long param_1)
   return;
 }
 ```
-</details>
+
+If another function can and/or will interact with this freed memory, `show` and `add` functionalities for example, are going to interact and acces these memory locations. Therefore, in summary, what we're going to do is deleting a note, this means freeing up the note's content without nullyfing its pointer. Then we can use the `add` functionalities to allocate new data into the newly freed memory space, manipulate heap to place data (such as the libc address) into the freed memory space, and then finally using the `show` option we can leak the address. In the end, we can bypass ASLR this way, pretty smoothly.
+
+The solution below will demonstrate the necessity of safe memory management practices, including nullifying pointers after freeing memory and validating pointers before use. 
 
 ## Solution
 
-What we can see during the disassembly is that our assumption was correct. Option 42 is trying to execute the address from page 0 with the argument of page 1 as parameter. This means we are going to attemt use after free vulnerability exploitation. Malloc metadata from the freed chunks should be leakable. Our plan is to prepare the heap, fill up the tcache bins, so the metadata of malloc is going to leak the `unsortedbin` address in libc and finally we can calculate the base address of it.
+What we can see during the disassembly is that our assumption was correct. Option 42 is trying to execute the address from page 0 with the argument of page 1 as parameter. This means we are going to attempt use after free vulnerability exploitation. Malloc metadata from the freed chunks should be leakable. Our plan is to prepare the heap, fill up the tcache bins, so the metadata of malloc is going to leak the `unsortedbin` address in libc and finally we can calculate the base address of it.
 
 It's pretty simple actually. Our approach is going to be abusing a user-after-free vulnerability, the strategy is exploiting the heap and leveraging a leak to call a libc function. In order to prepare for the heap manipulation, we need to set up the necessary conditions for the buffer overflow. This means filling up the tcache bins by creating and deleting several notes. Once the setup is ready, we can remove a note and the libc pointer is going to be put in its place. We can then proceed to read this note. Which isn't going to be a note, hell yeah; because that's how we're going to leak the libc address. From this point, we can find the system function's address in memory. 
 
 By creating another note, we can manipulate execution flow, and rewrite the function pointer/return address where we want to: to the system function's address. The second note that we create now is going to be the argument of the ystem function call, which is `'/bin/sh'` since we are planning to spawn a shell. And knowing from the disassembled code, we can now launch that undocumented super-secret '#42' functionality. That command #42 is going to trigger the execution flow of our buffer overflow. And that's it, wrapping it up.
 
-Check out the entire pwner script fully commented, everything should make sense.
+Summarizing these up:
+```text
+- fill the tcache bins by creating & deleting notes
+- exploit the UAF vuln by deleting a note then leak the libc address
+- use this address to calculate where `system` function lies
+- craft the input for option 42
+- call function 42 which spawns the shell
+```
+
+Check out the entire _pwner_ script fully commented, everything should make sense.
 
 ```python
 #!/usr/bin/env python3
