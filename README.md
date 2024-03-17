@@ -1,8 +1,9 @@
 # Cyber Apocalypse 2024: Hacker Royale
 
+
 ![image](https://github.com/respawnRW/writeups/assets/163560495/423e808d-cf38-448a-b643-e825bcc67591)
 
-Couple of my favorite challenges with their writeups.
+Thanks for visiting. Here you can find couple of my favorite challenges and their writeups.
 
 ## Pwn
 
@@ -14,6 +15,10 @@ Couple of my favorite challenges with their writeups.
 
 [QuickScan](rev/quickscan/README.md) | medium | writeup done.
 
+## Hardware
+
+[Flash-ing Logs](hw/flashing/README.md) | hard | writeup done.
+
 ## Forensics
 
 [Confinement](frns/confinement/README.md) | hard | (work in progress)
@@ -21,6 +26,6 @@ Couple of my favorite challenges with their writeups.
 [Game Invitation](frns/gameinv/README.md) | hard | (work in progress)
 
 
-## Hardware
+Over and out,
 
-[Flash-ing Logs](hw/flashing/README.md) | hard | (work in progress)
+`--RW`
