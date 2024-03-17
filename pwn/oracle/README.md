@@ -207,7 +207,7 @@ Have fun debugging.
 
 And let's not forget about the libc correct version, you extract that from docker container, in order to be sure.
 
-Next steps are the core of ROP chain construction. The memory address of `system` is what we are looking for, then we calculate the address of the gadget ending with `pop rdi; ret` As we discussed earlier this way we can control the value of the `rdi` register and manipulate execution flow. The second value is the register `rsi` which is going to be used as a second argument for our system function. Remember, we're planning to do `system('/bin/sh')`. `Next` function is going to retrieve the first occurence's address. Finally  the `dup2` system call within libc will be used to redirect standard i/o so we can interact with the spawned shell.
+Next steps are the core of ROP chain construction. The memory address of `system` is what we are looking for, then we calculate the address of the gadget ending with `pop rdi; ret` As we discussed earlier, this way we can control the value of the `rdi` register and manipulate execution flow. The second value is the register `rsi`, which is going to be used as a second argument for our system function. Remember, we're planning to do `system('/bin/sh')`. `Next` function is going to retrieve the first occurence's address. Finally  the `dup2` system call within libc will be used to redirect standard i/o so we can interact with the spawned shell.
 
 ```python
 libc = ELF('./libc-2.31.so')
@@ -233,7 +233,7 @@ payload = flat(
 io.send(payload + b'\r\n\r\n')
 ```
 
-Find below the entire code that does the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
+Find below the entire code that gets the job done. The pwn script was adapted and comprehensively commented in great depth with multiple print statements during execution. Run it without any arguments to execute it locally or run it with REMOTE argument to have it run remotely.
 
 ```python
 #!/usr/bin/env python3
