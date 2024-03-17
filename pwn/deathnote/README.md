@@ -8,8 +8,6 @@
 
 First let's examine what we got. The deathnote binary is a simple note app with 4 functionalities. It is a secret what function 42 does, haha.
 
-Main that are self-explanatory functionalities are note creation (create note), remove entry (freeing up), and showing (displaying a note).
-
 ![image](https://github.com/respawnRW/writeups/assets/163560495/491c9633-53eb-4064-beb4-e4b833991a99)
 
 Let's check the binary securities, we also know that it's a pwn challenge, we ned to know what we are facing.
@@ -24,11 +22,21 @@ Let's check the binary securities, we also know that it's a pwn challenge, we ne
     RUNPATH:  b'./glibc/'
 ```
 
+Main options that are self-explanatory functionalities are note creation (create note), remove entry (freeing up), and displaying a note.
 
+If we launch the binary, functionalities 1-3 are working fine. Nonetheless, the option 42 is giving us a segmentation fault.
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/2052f961-f70a-4f83-b6ad-94e8d3260220)
+
+Assumption is that we are trying to execute memory location, something that causes the segmentation fault. 
+
+And we're going to work on this! Option no 42 is the key ?¿?¿? to pwn.
 
 ## Solution
 
-It's pretty simple actually. Our approach is going to be abusing a user-after-free vulnerability, the strategy is exploiting the heap and leveraging a leak to call a libc function. In order to prepare for the heap manipulation, we need to set up the necessary conditions for the buffer overflow. This means filling up the tcache bins by creating and deleting several notes. Once the setup is ready, we can remove a note and the libc pointer is going to be put in its place. We can then proceed to read this note. Which isn't going to be a note, hell yeah; because that's how we're going to leak the libc address. From this point, we can find the system function's address in memory.
+What we can see during the disassembly is that our assumption was correct. Option 42 is trying to execute the address from page 0 with the argument of page 1 as parameter. This means we are going to attemt use after free vulnerability exploitation. Malloc metadata from the freed chunks should be leakable. Our plan is to prepare the heap, fill up the tcache bins, so the metadata of malloc is going to leak the `unsortedbin` address in libc and finally we can calculate the base address of it.
+
+It's pretty simple actually. Our approach is going to be abusing a user-after-free vulnerability, the strategy is exploiting the heap and leveraging a leak to call a libc function. In order to prepare for the heap manipulation, we need to set up the necessary conditions for the buffer overflow. This means filling up the tcache bins by creating and deleting several notes. Once the setup is ready, we can remove a note and the libc pointer is going to be put in its place. We can then proceed to read this note. Which isn't going to be a note, hell yeah; because that's how we're going to leak the libc address. From this point, we can find the system function's address in memory. 
 
 By creating another note, we can manipulate execution flow, and rewrite the function pointer/return address where we want to: to the system function's address. The second note that we create now is going to be the argument of the ystem function call, which is `'/bin/sh'` since we are planning to spawn a shell. And knowing from the disassembled code, we can now launch that undocumented super-secret '#42' functionality. That command #42 is going to trigger the execution flow of our buffer overflow. And that's it, wrapping it up.
 
@@ -115,3 +123,7 @@ Be done with it.
 Hope you find it useful,
 
 `--RW`
+
+## Resources
+
+https://6point6.co.uk/insights/common-software-vulnerabilities-part-ii-explaining-the-use-after-free/
