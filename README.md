@@ -8,7 +8,7 @@ Couple of my favorite challenges with their writeups.
 
 [Oracle](pwn/oracle/README.md) | hard | writeup done.
 
-[Deathnote](pwn/deathnote/README.md) | hard | (work in progress)
+[Deathnote](pwn/deathnote/README.md) | medium | writeup done.
 
 ## Reversing
 
