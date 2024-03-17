@@ -174,7 +174,7 @@ It iterates over the data in chunks of 16 bytes, each representing a record. We 
 
 This way we are maintaining data integrity and won't raise any red flags.
 
-This was the essential function for our challenge as it allows us to cover out tracks, eliminate any trace, hehe.
+This was the essential function for our challenge as it allows us to cover our tracks, eliminate any trace, hehe.
 
 ```python
 def modify_records(data, key):
@@ -197,7 +197,7 @@ def modify_records(data, key):
         print("No records with User ID 0x5244 found, but proceeding with operations...")
     return data
 ```
-And finally the `process_flash` function which is responsible for processind the modified records and writing them back to the flash chip.
+And finally the `process_flash` function which is responsible for processing the modified records and writing them back to the flash chip.
 
 Enable writing instruction is `06h` and erase sector is `20h`. Iterate over the modified records in 256 byte chunks and call the write_data for each.
 
@@ -319,11 +319,11 @@ And find how it runs, first execution - when the userID is found and altered - c
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/f3d4a3b4-43dd-4b7a-ada9-125747b1f1cf)
 
-And this is what it looks like if we run again - no records are going to be found:
+And this is what it looks like if we run it again - no records are going to be found:
 
 ![image](https://github.com/respawnRW/writeups/assets/163560495/7d1b74af-1c80-4525-8b81-a18cd41ce3ba)
 
-Job done! As final concluding thought, need to point out that manipulating data in a flash memory using erase or program instructions carries a risk. Always you should create a full memory dump of the chip. With a local dump of the memory, you can always restore it to its original state if needed. Especially if doing scripts or programatically manipulating the memory of a chip. Irreversible data loss is inevitable.
+Job done! As final concluding thought, need to point out that manipulating data in a flash memory using erase or program instructions carries a risk. You should always create a full memory dump of the chip. With a local dump of the memory, you can always restore it to its original state if needed. Especially if doing scripts or programatically manipulating the memory of a chip. Irreversible data loss is inevitable.
 
 Flag: `HTB{n07h1n9_15_53cu23_w17h_phy51c41_4cc355!@}`
 
