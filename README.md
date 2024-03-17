@@ -11,13 +11,13 @@ Thanks for visiting. Here you can find couple of my favorite challenges and thei
 
 [Deathnote](pwn/deathnote/README.md) | medium | writeup done.
 
-## Reversing
-
-[QuickScan](rev/quickscan/README.md) | medium | writeup done.
-
 ## Hardware
 
 [Flash-ing Logs](hw/flashing/README.md) | hard | writeup done.
+
+## Reversing
+
+[QuickScan](rev/quickscan/README.md) | medium | writeup done.
 
 ## Forensics
 
